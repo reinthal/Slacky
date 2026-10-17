@@ -60,6 +60,8 @@ buildNpmPackage {
 
     mkdir -p $out/share/slacky
     cp -r package.json dist $out/share/slacky/
+    # Tray icon, loaded at runtime relative to the app directory
+    install -Dm644 build/icons/icon.png $out/share/slacky/build/icons/icon.png
 
     install -Dm644 build/icons/icon.png $out/share/icons/hicolor/512x512/apps/slacky.png
 

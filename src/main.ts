@@ -4,10 +4,17 @@ import {
   Session,
   OnBeforeSendHeadersListenerDetails,
   BeforeSendResponse,
-  ipcMain
+  ipcMain,
+  desktopCapturer,
+  Menu,
+  Tray,
+  nativeImage
 } from 'electron'
 import * as path from 'path'
 import { SlackyEvent } from './events'
+
+const SLACK_APP_URL = 'https://app.slack.com/client'
+const PROTOCOL = 'slack'
 
 const defaultUserAgent =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36'
@@ -27,6 +34,56 @@ const enhanceSession = (session: Session) => {
       })
     }
   )
+}
+
+/**
+ * Huddle screen sharing goes through `navigator.mediaDevices.getDisplayMedia()`,
+ * which Electron rejects unless the session provides a display media handler.
+ * On macOS the system picker is used; on Linux the first screen is shared (on
+ * Wayland, PipeWire capture shows the xdg-desktop-portal picker instead).
+ */
+const enableScreenSharing = (session: Session) => {
+  session.setDisplayMediaRequestHandler(
+    (_request, callback) => {
+      desktopCapturer
+        .getSources({ types: ['screen', 'window'] })
+        .catch(() => [] as Electron.DesktopCapturerSource[])
+        .then((sources) => {
+          const source = sources.find((s) => s.id.startsWith('screen:')) ?? sources[0]
+          // Electron rejects the request when the callback gets null (an empty
+          // object throws instead); its typings just don't list null.
+          callback(source ? { video: source } : (null as unknown as Electron.Streams))
+        })
+    },
+    { useSystemPicker: true }
+  )
+}
+
+const findDeepLink = (argv: string[]): string | undefined =>
+  argv.find((arg) => arg.startsWith(`${PROTOCOL}://`))
+
+/**
+ * Translate a Slack deep link (https://api.slack.com/reference/deep-linking)
+ * into the web client URL that shows the same thing. Only links whose web
+ * equivalent is unambiguous are mapped; anything else just opens Slack.
+ *   slack://open?team=T123            -> /client/T123
+ *   slack://channel?team=T123&id=C456 -> /client/T123/C456
+ */
+const deepLinkToUrl = (link: string): string => {
+  const isSlackId = (value: string | null): value is string =>
+    value !== null && /^[A-Z0-9]+$/.test(value)
+
+  try {
+    const url = new URL(link)
+    const team = url.searchParams.get('team')
+    const id = url.searchParams.get('id')
+    if (url.hostname === 'channel' && isSlackId(team) && isSlackId(id))
+      return `${SLACK_APP_URL}/${team}/${id}`
+    if (url.hostname === 'open' && isSlackId(team)) return `${SLACK_APP_URL}/${team}`
+  } catch {
+    // Malformed link: fall through to the default view.
+  }
+  return SLACK_APP_URL
 }
 
 /**
@@ -77,6 +134,8 @@ export default class Main {
   static mainWindow: Electron.BrowserWindow | null
   static application: Electron.App
   static BrowserWindow
+  static tray: Electron.Tray | null = null
+  static isQuitting = false
 
   private static onWindowAllClosed() {
     if (process.platform !== 'darwin') Main.application.quit()
@@ -88,7 +147,7 @@ export default class Main {
   }
 
   private static onReady() {
-    const SLACK_APP_URL = 'https://app.slack.com/client'
+    Main.createTray()
 
     Main.mainWindow = new BrowserWindow({
       roundedCorners: true,
@@ -120,23 +179,73 @@ export default class Main {
       applyExternalLinkPolicy(childWindow.webContents)
     })
 
-    Main.mainWindow.loadURL(SLACK_APP_URL, {
+    const deepLink = findDeepLink(process.argv)
+    Main.mainWindow.loadURL(deepLink ? deepLinkToUrl(deepLink) : SLACK_APP_URL, {
       userAgent: defaultUserAgent
     })
 
     // Stop flashing the taskbar entry once the window is actually focused.
     Main.mainWindow.on('focus', () => Main.mainWindow?.flashFrame(false))
 
+    // With a tray icon, closing the window only hides it so notifications keep
+    // arriving; quit from the tray menu or with Ctrl+Q.
+    Main.mainWindow.on('close', (event) => {
+      if (Main.tray && !Main.isQuitting) {
+        event.preventDefault()
+        Main.mainWindow?.hide()
+      }
+    })
+
     Main.mainWindow.on('closed', Main.onClose)
   }
 
   /**
-   * Bring the Slacky window back to the foreground. Triggered from the preload
-   * when a Slack notification is clicked. On Linux (especially Wayland) the
+   * Add a tray (status notifier) icon to show the window again or quit. The
+   * desktop needs a tray host for it to be visible (Cinnamon, KDE and XFCE have
+   * one; GNOME needs the AppIndicator extension). Launching Slacky again always
+   * brings a hidden window back.
+   */
+  private static createTray() {
+    const icon = nativeImage
+      .createFromPath(path.join(Main.application.getAppPath(), 'build/icons/icon.png'))
+      .resize({ width: 32, height: 32 })
+
+    try {
+      Main.tray = new Tray(icon)
+    } catch (error) {
+      // Without a tray, closing the window quits as before.
+      console.warn('Slacky: tray icon unavailable', error)
+      return
+    }
+    Main.tray.setToolTip('Slacky')
+    Main.tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: 'Show Slacky', click: Main.showWindow },
+        { type: 'separator' },
+        { label: 'Quit', click: () => Main.application.quit() }
+      ])
+    )
+    Main.tray.on('click', Main.showWindow)
+  }
+
+  /**
+   * Another launch of Slacky (from the app menu, or the OS opening a slack://
+   * link) hands its arguments to this instance instead of starting a second
+   * copy.
+   */
+  private static onSecondInstance(_event: Electron.Event, argv: string[]) {
+    const deepLink = findDeepLink(argv)
+    if (deepLink) Main.mainWindow?.loadURL(deepLinkToUrl(deepLink), { userAgent: defaultUserAgent })
+    Main.showWindow()
+  }
+
+  /**
+   * Bring the Slacky window back to the foreground, e.g. when a Slack
+   * notification is clicked or the tray icon is used. On Linux (especially Wayland) the
    * compositor may refuse to let an app raise itself, so we restore + show +
    * focus and fall back to flashing the taskbar entry as an urgency hint.
    */
-  private static onNotificationClicked() {
+  private static showWindow() {
     const win = Main.mainWindow
     if (!win) return
 
@@ -149,21 +258,34 @@ export default class Main {
   static main(app: Electron.App, browserWindow: typeof BrowserWindow) {
     Main.BrowserWindow = browserWindow
     Main.application = app
+
+    // Only one Slacky may run; later launches are forwarded to this one.
+    if (!Main.application.requestSingleInstanceLock()) {
+      Main.application.quit()
+      return
+    }
+    Main.application.on('second-instance', Main.onSecondInstance)
+    Main.application.on('before-quit', () => {
+      Main.isQuitting = true
+    })
+
     Main.application.on('window-all-closed', Main.onWindowAllClosed)
     Main.application.on('ready', Main.onReady)
 
-    ipcMain.on(SlackyEvent.NotificationClicked, Main.onNotificationClicked)
+    ipcMain.on(SlackyEvent.NotificationClicked, Main.showWindow)
 
     Main.application.on('session-created', (session) => {
       enhanceSession(session)
+      enableScreenSharing(session)
     })
 
     /**
-     * Define custom protocol handler. Deep linking works on packaged versions of the application ONLY
-     * to use it, you can open links on browser with the following url: slack://<your-path>
+     * Register as the slack:// handler. Deep linking works on packaged versions of the
+     * application (deb/rpm/AppImage, Nix) only, as it needs the installed desktop entry.
+     * The links are translated by `deepLinkToUrl`.
      * docs: https://api.slack.com/reference/deep-linking
      */
-    if (!Main.application.isDefaultProtocolClient('slack'))
-      Main.application.setAsDefaultProtocolClient('slack')
+    if (!Main.application.isDefaultProtocolClient(PROTOCOL))
+      Main.application.setAsDefaultProtocolClient(PROTOCOL)
   }
 }

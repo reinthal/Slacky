@@ -9,6 +9,8 @@ directories:
 files:
   - package.json
   - dist/app/**/*
+  # Tray icon, loaded at runtime
+  - build/icons/icon.png
   - node_modules
 protocols:
   - name: electron-deep-linking

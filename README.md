@@ -5,6 +5,14 @@ Features
 
 - Full support for ARM64 Linux distributions (Fedora Asahi Remix and Raspberry Pi OS, etc.)
 - Regular updates to ensure compatibility and performance
+- Tray icon: closing the window keeps Slacky running in the tray so notifications keep
+  arriving. Quit from the tray menu or with `Ctrl+Q`. The tray needs a desktop with a tray
+  host (Cinnamon, KDE, XFCE; GNOME needs the AppIndicator extension); launching Slacky
+  again always brings the window back.
+- Single instance: launching Slacky again focuses the running window.
+- `slack://` deep links (`slack://open?team=…`, `slack://channel?team=…&id=…`) open in the
+  running Slacky.
+- Screen sharing in huddles.
 
 ## 📝 Planned Features
 - Slacky is planned to be released on [Flathub](https://flathub.org/) [soon](https://github.com/andirsun/Slacky/issues/10). Stay tuned for installation instructions and package availability.
