@@ -15,6 +15,56 @@ Features
 1. Download the latest release from the [Releases page](https://github.com/andirsun/Slacky/releases).
 2. Install the package and enjoy!
 
+### ❄️ Nix / NixOS (x86_64 and arm64)
+
+The repository ships a `flake.nix` that builds Slacky against the Electron from
+nixpkgs.
+
+Try it without installing:
+
+```sh
+nix run github:reinthal/Slacky
+```
+
+Install it into your user profile:
+
+```sh
+nix profile install github:reinthal/Slacky
+```
+
+Or add it to a flake-based NixOS configuration:
+
+```nix
+{
+  inputs.slacky.url = "github:reinthal/Slacky";
+
+  outputs = { nixpkgs, slacky, ... }: {
+    nixosConfigurations.my-machine = nixpkgs.lib.nixosSystem {
+      modules = [
+        ({ pkgs, ... }: {
+          environment.systemPackages = [ slacky.packages.${pkgs.stdenv.hostPlatform.system}.default ];
+        })
+      ];
+    };
+  };
+}
+```
+
+On a channel-based system without flakes (for example Nixbook), add this to
+your `configuration.nix` and run `sudo nixos-rebuild switch`:
+
+```nix
+{ pkgs, ... }:
+let
+  slackySrc = builtins.fetchTarball "https://github.com/reinthal/Slacky/archive/main.tar.gz";
+in
+{
+  environment.systemPackages = [ (pkgs.callPackage "${slackySrc}/nix/package.nix" { }) ];
+}
+```
+
+Set `NIXOS_OZONE_WL=1` to run natively on Wayland.
+
 ## 💻 Development
 
 1. Clone the repository
@@ -22,6 +72,9 @@ Features
 3. Start the development server: `npm run dev`
 4. If you want to build and package the application, run: `npm run build && npm run pack`
 5. To run the application in production mode, use: `npm run start`
+
+When you change `package-lock.json`, update `npmDepsHash` in `nix/package.nix`
+(run `nix build`; on a mismatch Nix prints the correct hash).
 
 ## 🤝 Contributing
 I welcome contributions from the community! If you'd like to contribute, please feel free to submit a pull request (PR). Here's how you can get started:
